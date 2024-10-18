@@ -39,9 +39,18 @@ class RpcConflictException extends RpcException {
   }
 }
 
+class RpcUnauthorizedException extends RpcException {
+  constructor(message: string) {
+    super({
+      message,
+      status: HttpStatus.UNAUTHORIZED,
+    });
+  }
+}
 export {
   RpcNotFoundErrorException,
   RpcBadErrorException,
   RpcNoContentException,
   RpcConflictException,
+  RpcUnauthorizedException,
 };
