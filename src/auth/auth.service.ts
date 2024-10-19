@@ -1,19 +1,29 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User } from 'src/mongodb/schemas/user.schema';
-import { LoginUserDto, RegisterUserDto, VerifyUserDto } from './dto';
+import {
+  AuthUserDto,
+  RegisterUserDto,
+  ValidateTokenDto,
+  VerifyUserDto,
+} from './dto';
 import {
   RpcConflictException,
+  RpcNotFoundErrorException,
   RpcUnauthorizedException,
 } from 'src/common/exceptions/rpc.exception';
 import * as argon2 from 'argon2';
 import { AuthJwtPayload } from './interfaces/jwt-auth.interface';
 import { JwtService } from '@nestjs/jwt';
+import jwtRefreshConfig from './config/jwt-refresh.config';
+import { ConfigType } from '@nestjs/config';
 @Injectable()
 export class AuthService {
   constructor(
     @InjectModel(User.name) private readonly usersModule: Model<User>,
+    @Inject(jwtRefreshConfig.KEY)
+    private refreshTokenConfig: ConfigType<typeof jwtRefreshConfig>,
     private readonly jwtService: JwtService,
   ) {}
 
@@ -37,25 +47,59 @@ export class AuthService {
       password: result.password,
     };
   }
+  async updateHashedRefreshToken(userId: string, refreshToken: string | null) {
+    const updateRefreshToken = this.usersModule.findByIdAndUpdate(userId, {
+      refreshToken,
+    });
+    return updateRefreshToken;
+  }
   async validateUser(verifyUserDto: VerifyUserDto) {
     const { email, password } = verifyUserDto;
     const user = await this.usersModule.findOne(
       { email },
       { _id: 1, password: 1, email: 1 },
     );
-    if (!user) throw new RpcUnauthorizedException('User not found.');
+    if (!user) throw new RpcNotFoundErrorException('User not found.');
     const isPasswordMatch = await argon2.verify(user.password, password);
     if (!isPasswordMatch)
       throw new RpcUnauthorizedException('Invalid Password!');
     return { id: user._id, email: user.email };
   }
-  async generateToken(user: LoginUserDto) {
+  async generateToken(user: AuthUserDto) {
     const payload: AuthJwtPayload = { sub: user.id, email: user.email };
-    const accessToken = await this.jwtService.signAsync(payload);
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwtService.signAsync(payload),
+      this.jwtService.signAsync(payload, this.refreshTokenConfig),
+    ]);
 
-    return { accessToken, email: payload.email, id: payload.sub };
+    const hashedRefreshToken = await argon2.hash(refreshToken);
+    await this.updateHashedRefreshToken(user.id, hashedRefreshToken);
+
+    return { accessToken, refreshToken };
   }
-  async loginUser(loginUserDto: LoginUserDto) {
-    return this.generateToken(loginUserDto);
+  async loginUser(loginUserDto: AuthUserDto) {
+    const tokens = await this.generateToken(loginUserDto);
+    return { ...tokens, id: loginUserDto.id };
+  }
+  async refreshToken(refreshUserDto: AuthUserDto) {
+    return this.generateToken(refreshUserDto);
+  }
+  async validateRefreshToken(tokenDto: ValidateTokenDto) {
+    const user = await this.usersModule.findOne(
+      { _id: tokenDto.id },
+      { email: 1, refreshToken: 1 },
+    );
+    if (!user) throw new RpcNotFoundErrorException('User not found.');
+    const isRefreshTokenValid = await argon2.verify(
+      user.refreshToken,
+      tokenDto.refreshToken,
+    );
+    if (!isRefreshTokenValid)
+      throw new RpcUnauthorizedException('Invalid refresh token!');
+    return { email: user.email, id: tokenDto.id };
+  }
+  async logout(logoutDto: AuthUserDto) {
+    await this.updateHashedRefreshToken(logoutDto.id, null);
+    return { message: 'logout successfull' };
   }
 }
