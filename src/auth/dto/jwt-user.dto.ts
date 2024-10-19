@@ -7,5 +7,5 @@ export class ValidateTokenDto {
 
   @IsString()
   @IsNotEmpty()
-  refreshToken: string;
+  jti: string;
 }

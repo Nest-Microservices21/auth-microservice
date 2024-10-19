@@ -47,9 +47,13 @@ export class AuthService {
       password: result.password,
     };
   }
-  async updateHashedRefreshToken(userId: string, refreshToken: string | null) {
+  async updateHashedRefreshToken(
+    userId: string,
+    { jti, expiresAt }: { jti: string | null; expiresAt: Date | null },
+  ) {
     const updateRefreshToken = this.usersModule.findByIdAndUpdate(userId, {
-      refreshToken,
+      jti,
+      expiresAt,
     });
     return updateRefreshToken;
   }
@@ -69,11 +73,16 @@ export class AuthService {
     const payload: AuthJwtPayload = { sub: user.id, email: user.email };
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload),
-      this.jwtService.signAsync(payload, this.refreshTokenConfig),
+      this.jwtService.signAsync(
+        { ...payload, jti: crypto.randomUUID() },
+        this.refreshTokenConfig,
+      ),
     ]);
-
-    const hashedRefreshToken = await argon2.hash(refreshToken);
-    await this.updateHashedRefreshToken(user.id, hashedRefreshToken);
+    const data: AuthJwtPayload = this.jwtService.decode(refreshToken);
+    await this.updateHashedRefreshToken(user.id, {
+      jti: data.jti,
+      expiresAt: data.exp ? new Date(data.exp * 1000) : null,
+    });
 
     return { accessToken, refreshToken };
   }
@@ -87,19 +96,21 @@ export class AuthService {
   async validateRefreshToken(tokenDto: ValidateTokenDto) {
     const user = await this.usersModule.findOne(
       { _id: tokenDto.id },
-      { email: 1, refreshToken: 1 },
+      { email: 1, jti: 1, expiresAt: 1 },
     );
     if (!user) throw new RpcNotFoundErrorException('User not found.');
-    const isRefreshTokenValid = await argon2.verify(
-      user.refreshToken,
-      tokenDto.refreshToken,
-    );
-    if (!isRefreshTokenValid)
-      throw new RpcUnauthorizedException('Invalid refresh token!');
+    if (tokenDto.jti !== user.jti)
+      throw new RpcUnauthorizedException('Invalid refresh token.');
+    if (new Date() > new Date(user.expiresAt))
+      throw new RpcUnauthorizedException('Refresh token expired.');
+
     return { email: user.email, id: tokenDto.id };
   }
   async logout(logoutDto: AuthUserDto) {
-    await this.updateHashedRefreshToken(logoutDto.id, null);
+    await this.updateHashedRefreshToken(logoutDto.id, {
+      expiresAt: null,
+      jti: null,
+    });
     return { message: 'logout successfull' };
   }
 }
